@@ -16,6 +16,15 @@ function pressed(code) {
   return val;
 }
 
+window.addEventListener('keydown', (e) => {
+  if (!keys[e.code]) justPressed[e.code] = true;
+  keys[e.code] = true;
+});
+
+window.addEventListener('keyup', (e) => {
+  keys[e.code] = false;
+});
+
 // ── Utils ─────────────────────────────────────────────────────────────────────
 const wrap = (v, max) => ((v % max) + max) % max;
 const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -24,14 +33,14 @@ const randInt = (min, max) => Math.floor(rand(min, max + 1));
 
 // ── Bullet ────────────────────────────────────────────────────────────────────
 class Bullet {
-  constructor(x, y, angle) {
+  constructor(x, y, angle, speed = 520, ttl = 1.1, enemy = false) {
     this.x = x;
     this.y = y;
-    const SPEED = 520;
-    this.vx = Math.cos(angle) * SPEED;
-    this.vy = Math.sin(angle) * SPEED;
-    this.ttl = 1.1;
-    this.radius = 2;
+    this.vx = Math.cos(angle) * speed;
+    this.vy = Math.sin(angle) * speed;
+    this.ttl = ttl;
+    this.radius = enemy ? 3 : 2;
+    this.enemy = enemy;
     this.dead = false;
   }
 
@@ -43,7 +52,7 @@ class Bullet {
   }
 
   draw() {
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = this.enemy ? '#ff5f4d' : '#fff';
     ctx.beginPath();
     ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
     ctx.fill();
@@ -54,6 +63,10 @@ class Bullet {
 const RADII = [0, 16, 30, 50];   // por tamaño 1, 2, 3
 const SPEEDS = [0, 85, 55, 32];   // velocidad base por tamaño
 const POINTS = [0, 100, 50, 20];  // puntos por tamaño
+const SHOOTER_CHANCE = 0.1;
+const SHOOTER_COOLDOWN = 2;
+const SHOOTER_BULLET_SPEED = 130;
+const SHOOTER_BULLET_TTL = 4.5;
 
 class Asteroid {
   constructor(x, y, size = 3) {
@@ -70,6 +83,9 @@ class Asteroid {
     this.rotSpeed = rand(-1.2, 1.2);
     this.rot = rand(0, Math.PI * 2);
 
+    this.canShoot = Math.random() < SHOOTER_CHANCE;
+    this.shootCooldown = rand(0.5, SHOOTER_COOLDOWN);
+
     // Polígono irregular
     const n = randInt(8, 13);
     this.verts = [];
@@ -84,6 +100,14 @@ class Asteroid {
     this.x = wrap(this.x + this.vx * dt, W);
     this.y = wrap(this.y + this.vy * dt, H);
     this.rot += this.rotSpeed * dt;
+    if (this.canShoot && this.shootCooldown > 0) this.shootCooldown -= dt;
+  }
+
+  tryShoot(target) {
+    if (!this.canShoot || this.shootCooldown > 0 || this.dead) return [];
+    this.shootCooldown = SHOOTER_COOLDOWN;
+    const angle = Math.atan2(target.y - this.y, target.x - this.x);
+    return [new Bullet(this.x, this.y, angle, SHOOTER_BULLET_SPEED, SHOOTER_BULLET_TTL, true)];
   }
 
   split() {
@@ -158,6 +182,10 @@ class Ship {
     const NOSE = 21;
     const ox = this.x + Math.cos(this.angle) * NOSE;
     const oy = this.y + Math.sin(this.angle) * NOSE;
+    if (spreadActive) {
+      const SPREAD_ANGLE = 0.15;
+      return [-2, -1, 0, 1, 2].map(i => new Bullet(ox, oy, this.angle + i * SPREAD_ANGLE));
+    }
     return [new Bullet(ox, oy, this.angle)];
   }
 
@@ -229,10 +257,11 @@ class Particle {
 }
 
 // ── Estado del juego ──────────────────────────────────────────────────────────
-let ship, bullets, asteroids, particles;
+let ship, bullets, enemyBullets, asteroids, particles;
 let score, lives, level;
 let state;      // 'playing' | 'dead' | 'gameover'
 let deadTimer;
+let spreadActive; // abanico de 5 balas, activo desde el inicio del nivel hasta la primera muerte
 
 function spawnAsteroids(count) {
   const SAFE_DIST = 130;
@@ -249,20 +278,24 @@ function spawnAsteroids(count) {
 function initGame() {
   ship = new Ship();
   bullets = [];
+  enemyBullets = [];
   asteroids = [];
   particles = [];
   score = 0;
   lives = 3;
   level = 1;
   state = 'playing';
+  spreadActive = true;
   spawnAsteroids(4);
 }
 
 function nextLevel() {
   level++;
   bullets = [];
+  enemyBullets = [];
   particles = [];
   ship.reset();
+  spreadActive = true;
   spawnAsteroids(3 + level);
 }
 
@@ -273,6 +306,7 @@ function explode(x, y, count = 8) {
 function killShip() {
   explode(ship.x, ship.y, 14);
   ship.dead = true;
+  spreadActive = false;
   lives--;
   if (lives <= 0) {
     state = 'gameover';
@@ -307,11 +341,20 @@ function update(dt) {
 
   ship.update(dt);
   bullets.forEach(b => b.update(dt));
+  enemyBullets.forEach(b => b.update(dt));
   asteroids.forEach(a => a.update(dt));
   particles.forEach(p => p.update(dt));
 
   bullets = bullets.filter(b => !b.dead);
+  enemyBullets = enemyBullets.filter(b => !b.dead);
   particles = particles.filter(p => !p.dead);
+
+  // Asteroides que disparan a la nave
+  if (!ship.dead) {
+    for (const a of asteroids) {
+      enemyBullets.push(...a.tryShoot(ship));
+    }
+  }
 
   // Bala vs asteroide
   const newAsteroids = [];
@@ -338,6 +381,18 @@ function update(dt) {
       }
     }
   }
+
+  // Nave vs bala de asteroide
+  if (ship.invincible <= 0) {
+    for (const b of enemyBullets) {
+      if (!b.dead && dist(ship, b) < ship.radius + b.radius) {
+        b.dead = true;
+        killShip();
+        break;
+      }
+    }
+  }
+  enemyBullets = enemyBullets.filter(b => !b.dead);
 
   // Nivel completado
   if (asteroids.length === 0) nextLevel();
@@ -374,6 +429,12 @@ function drawHUD() {
   for (let i = 0; i < lives; i++)
     drawLifeIcon(W - 16 - i * 22, 18);
 
+  if (spreadActive) {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(120, 220, 255, 0.9)';
+    ctx.font = '13px monospace';
+    ctx.fillText('ABANICO ACTIVO', W / 2, 48);
+  }
 }
 
 function drawOverlay(title, sub) {
@@ -393,6 +454,7 @@ function draw() {
   particles.forEach(p => p.draw());
   asteroids.forEach(a => a.draw());
   bullets.forEach(b => b.draw());
+  enemyBullets.forEach(b => b.draw());
   ship.draw();
 
   drawHUD();
